@@ -4,6 +4,7 @@ import sqlite3
 import datetime
 from typing import Optional
 from dotenv import load_dotenv
+import aiohttp
 from aiohttp import web
 
 import discord
@@ -12,6 +13,7 @@ from discord import app_commands
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_TOKEN") or os.getenv("HF_API_KEY")
 
 env_whitelist = os.getenv("WHITELIST", "")
 WHITELISTED_USERS = set()
@@ -122,6 +124,56 @@ def is_whitelisted():
             return True
         raise commands.CheckFailure("Unauthorized execution.")
     return commands.check(predicate)
+
+async def ask_ai(prompt: str) -> str:
+    if not HF_TOKEN:
+        return "Hugging Face token is not configured. Please add HF_TOKEN to environment variables."
+
+    url = "https://router.huggingface.co/hf-inference/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN.strip()}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "Qwen/Qwen2.5-7B-Instruct",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are Amethyst, a direct, concise, and helpful server AI assistant."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "max_tokens": 500,
+        "temperature": 0.7
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=25) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                else:
+                    fb_url = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta"
+                    fb_payload = {
+                        "inputs": f"<|system|>\nYou are Amethyst, a helpful assistant.</s>\n<|user|>\n{prompt}</s>\n<|assistant|>\n",
+                        "parameters": {"max_new_tokens": 300}
+                    }
+                    async with session.post(fb_url, headers=headers, json=fb_payload, timeout=25) as fb_resp:
+                        if fb_resp.status == 200:
+                            fb_data = await fb_resp.json()
+                            if isinstance(fb_data, list) and len(fb_data) > 0:
+                                res_text = fb_data[0].get("generated_text", "")
+                                if "<|assistant|>\n" in res_text:
+                                    return res_text.split("<|assistant|>\n")[-1].strip()
+                                return res_text.strip()
+                    err_text = await resp.text()
+                    return f"Hugging Face Error ({resp.status}): {err_text[:120]}"
+    except Exception as exc:
+        return f"Error contacting AI service: {exc}"
 
 async def handle_ping(request):
     return web.Response(text="Bot is operational.")
@@ -259,15 +311,20 @@ async def on_message(message: discord.Message):
             return
 
     if bot.user in message.mentions and not message.mention_everyone:
-        embed = build_purple_embed(
-            title="Amethyst Moderation",
-            description=f"Hello {message.author.mention}. Use `/modhelp` or `!modhelp` to see active commands."
-        )
-        f = get_footer_file()
-        if f:
-            await message.reply(embed=embed, file=f)
-        else:
-            await message.reply(embed=embed)
+        clean_prompt = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+        if not clean_prompt:
+            clean_prompt = "Hello!"
+            
+        async with message.channel.typing():
+            ai_reply = await ask_ai(clean_prompt)
+            if len(ai_reply) > 4000:
+                ai_reply = ai_reply[:3997] + "..."
+            embed = build_purple_embed(title="Amethyst AI", description=ai_reply)
+            f = get_footer_file()
+            if f:
+                await message.reply(embed=embed, file=f)
+            else:
+                await message.reply(embed=embed)
         return
 
     await bot.process_commands(message)
