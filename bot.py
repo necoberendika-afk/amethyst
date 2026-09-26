@@ -13,7 +13,7 @@ from discord import app_commands
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
 
 env_whitelist = os.getenv("WHITELIST", "")
 WHITELISTED_USERS = set()
@@ -126,16 +126,16 @@ def is_whitelisted():
     return commands.check(predicate)
 
 async def ask_deepseek(prompt: str) -> str:
-    if not DEEPSEEK_API_KEY:
-        return "DeepSeek API key is not configured."
+    if not OPENROUTER_API_KEY:
+        return "AI API key is not configured."
 
-    url = "https://api.deepseek.com/chat/completions"
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek/deepseek-chat:free",
         "messages": [
             {
                 "role": "system",
@@ -158,7 +158,7 @@ async def ask_deepseek(prompt: str) -> str:
                     err = await resp.text()
                     return f"API Error ({resp.status}): Unable to process response."
     except Exception as exc:
-        return f"Error contacting DeepSeek: {exc}"
+        return f"Error contacting AI: {exc}"
 
 async def handle_ping(request):
     return web.Response(text="Bot is operational.")
