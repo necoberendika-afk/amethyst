@@ -4,6 +4,7 @@ import sqlite3
 import datetime
 from typing import Optional
 from dotenv import load_dotenv
+import aiohttp
 from aiohttp import web
 
 import discord
@@ -12,6 +13,7 @@ from discord import app_commands
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 env_whitelist = os.getenv("WHITELIST", "")
 WHITELISTED_USERS = set()
@@ -22,6 +24,11 @@ if env_whitelist:
             WHITELISTED_USERS.add(int(uid))
 
 BANNED_WORDS = []
+
+PROFANITY_REGEX = re.compile(
+    r"\b(fuck|shit|bitch|asshole|cunt|dick|bastard|pussy|whore|nigger|nigga|faggot|fag|slut)\b", 
+    re.IGNORECASE
+)
 
 INVITE_REGEX = re.compile(
     r"(?:https?:\/\/)?(?:www\.)?(?:discord\.(?:gg|io|me|li)|discord(?:app)?\.com\/invite)\/[a-zA-Z0-9]+", 
@@ -118,6 +125,41 @@ def is_whitelisted():
         raise commands.CheckFailure("Unauthorized execution.")
     return commands.check(predicate)
 
+async def ask_deepseek(prompt: str) -> str:
+    if not DEEPSEEK_API_KEY:
+        return "DeepSeek API key is not configured."
+
+    url = "https://api.deepseek.com/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are Amethyst, a direct, concise, and helpful server AI assistant."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"]
+                else:
+                    err = await resp.text()
+                    return f"API Error ({resp.status}): Unable to process response."
+    except Exception as exc:
+        return f"Error contacting DeepSeek: {exc}"
+
 async def handle_ping(request):
     return web.Response(text="Bot is operational.")
 
@@ -202,6 +244,27 @@ async def on_message(message: discord.Message):
     )
 
     if not is_exempt:
+        if PROFANITY_REGEX.search(message.content):
+            try:
+                await message.delete()
+            except discord.Forbidden:
+                pass
+
+            count = db_add_warning(
+                message.guild.id, 
+                message.author.id, 
+                bot.user.id, 
+                "Automod", 
+                "Automated Warning: Inappropriate Language / Profanity"
+            )
+            embed = build_purple_embed(
+                title="Automod: Warning Issued",
+                description=f"{message.author.mention} has received a warning for profanity.\n**Total Infractions:** `{count}`"
+            )
+            warning_msg = await message.channel.send(embed=embed)
+            await warning_msg.delete(delay=5)
+            return
+
         if len(message.mentions) >= 5:
             try:
                 await message.delete()
@@ -231,6 +294,23 @@ async def on_message(message: discord.Message):
             except discord.Forbidden:
                 pass
             return
+
+    if bot.user in message.mentions and not message.mention_everyone:
+        clean_prompt = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+        if not clean_prompt:
+            clean_prompt = "Hello!"
+            
+        async with message.channel.typing():
+            ai_reply = await ask_deepseek(clean_prompt)
+            if len(ai_reply) > 4000:
+                ai_reply = ai_reply[:3997] + "..."
+            embed = build_purple_embed(title="Amethyst AI", description=ai_reply)
+            f = get_footer_file()
+            if f:
+                await message.reply(embed=embed, file=f)
+            else:
+                await message.reply(embed=embed)
+        return
 
     await bot.process_commands(message)
 
