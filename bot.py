@@ -1,5 +1,6 @@
 import os
 import re
+import urllib.parse
 import sqlite3
 import datetime
 from typing import Optional
@@ -13,7 +14,6 @@ from discord import app_commands
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 env_whitelist = os.getenv("WHITELIST", "")
 WHITELISTED_USERS = set()
@@ -126,40 +126,44 @@ def is_whitelisted():
     return commands.check(predicate)
 
 async def ask_ai(prompt: str) -> str:
-    if not GROQ_API_KEY:
-        return "AI API key is not configured. Please add GROQ_API_KEY."
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY.strip()}",
-        "Content-Type": "application/json"
-    }
+    url = "https://text.pollinations.ai/"
     payload = {
-        "model": "llama-3.3-70b-versatile",
         "messages": [
             {
                 "role": "system",
-                "content": "You are Amethyst, a direct, concise, and intelligent server assistant. Answer helpfully and cleanly without markdown fluff."
+                "content": "You are Amethyst, a direct, concise, and helpful server AI assistant."
             },
             {
                 "role": "user",
                 "content": prompt
             }
         ],
-        "temperature": 0.7,
-        "max_tokens": 1000
+        "model": "openai"
     }
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=25) as resp:
+            async with session.post(url, json=payload, timeout=25) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"]
-                else:
-                    return f"API Error ({resp.status}): Unable to process response."
+                    text = await resp.text()
+                    if text.strip():
+                        return text.strip()
+    except Exception:
+        pass
+
+    try:
+        encoded = urllib.parse.quote(prompt)
+        fallback_url = f"https://text.pollinations.ai/{encoded}?system=You+are+Amethyst+a+helpful+discord+assistant"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(fallback_url, timeout=25) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    if text.strip():
+                        return text.strip()
     except Exception as exc:
         return f"Error contacting AI service: {exc}"
+
+    return "Unable to generate response at this time."
 
 async def handle_ping(request):
     return web.Response(text="Bot is operational.")
