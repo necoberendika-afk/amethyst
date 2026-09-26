@@ -4,6 +4,7 @@ import sqlite3
 import datetime
 from typing import Optional
 from dotenv import load_dotenv
+from aiohttp import web
 
 import discord
 from discord.ext import commands
@@ -11,7 +12,6 @@ from discord import app_commands
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
-MODLOG_CHANNEL_ID = os.getenv("MODLOG_CHANNEL_ID")
 
 env_whitelist = os.getenv("WHITELIST", "")
 WHITELISTED_USERS = set()
@@ -118,39 +118,33 @@ def is_whitelisted():
         raise commands.CheckFailure("Unauthorized execution.")
     return commands.check(predicate)
 
+async def handle_ping(request):
+    return web.Response(text="Bot is operational.")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"[SYSTEM] Web server active on port {port}", flush=True)
+
+@bot.event
+async def setup_hook():
+    bot.loop.create_task(start_web_server())
+
 @bot.event
 async def on_ready():
+    print(f"[SYSTEM] Logged in as {bot.user} (ID: {bot.user.id})", flush=True)
     try:
         synced = await bot.tree.sync()
-        print(f"[SYSTEM] Logged in as {bot.user} (ID: {bot.user.id})")
-        print(f"[SYSTEM] Commands synced: {len(synced)}")
+        print(f"[SYSTEM] Commands synced: {len(synced)}", flush=True)
     except Exception as exc:
-        print(f"[ERROR] Sync error: {exc}")
+        print(f"[ERROR] Sync error: {exc}", flush=True)
 
-async def send_modlog(guild: discord.Guild, text: str, title: Optional[str] = None):
-    log_channel = None
-
-    if MODLOG_CHANNEL_ID and MODLOG_CHANNEL_ID.strip().isdigit():
-        log_channel = guild.get_channel(int(MODLOG_CHANNEL_ID.strip()))
-
-    if not log_channel:
-        log_channel = discord.utils.find(
-            lambda c: c.name in ["mod-logs", "modlogs", "mod-log", "logs", "server-logs"], 
-            guild.text_channels
-        )
-
-    if log_channel:
-        embed = build_purple_embed(title=title, description=text)
-        f = get_footer_file()
-        try:
-            if f:
-                await log_channel.send(embed=embed, file=f)
-            else:
-                await log_channel.send(embed=embed)
-        except discord.Forbidden:
-            pass
-
-async def safe_respond(ctx: commands.Context, message: str, ephemeral: bool = True, title: Optional[str] = None):
+async def safe_respond(ctx: commands.Context, message: str, ephemeral: bool = False, title: Optional[str] = None):
     embed = build_purple_embed(title=title, description=message)
     f = get_footer_file()
     try:
@@ -196,47 +190,6 @@ async def on_message_delete(message: discord.Message):
         "time": datetime.datetime.now(datetime.timezone.utc)
     }
 
-    content_preview = message.content if message.content else "*No text content*"
-    await send_modlog(
-        message.guild,
-        f"**Author:** {message.author} (`{message.author.id}`)\n**Channel:** {message.channel.mention}\n**Content:** {content_preview}",
-        title="Audit: Message Deleted"
-    )
-
-@bot.event
-async def on_message_edit(before: discord.Message, after: discord.Message):
-    if not before.guild or before.author.bot or before.content == after.content:
-        return
-
-    await send_modlog(
-        before.guild,
-        f"**Author:** {before.author} (`{before.author.id}`)\n**Channel:** {before.channel.mention}\n**Before:** {before.content}\n**After:** {after.content}",
-        title="Audit: Message Edited"
-    )
-
-@bot.event
-async def on_member_join(member: discord.Member):
-    created_ts = int(member.created_at.timestamp())
-    account_age = (datetime.datetime.now(datetime.timezone.utc) - member.created_at).days
-
-    flag = ""
-    if account_age < 7:
-        flag = "\n**Alert:** *High Risk: Account created less than 7 days ago.*"
-
-    await send_modlog(
-        member.guild,
-        f"**User:** {member.mention} (`{member.id}`)\n**Account Created:** <t:{created_ts}:F> (<t:{created_ts}:R>){flag}",
-        title="Audit: Member Joined"
-    )
-
-@bot.event
-async def on_member_remove(member: discord.Member):
-    await send_modlog(
-        member.guild,
-        f"**User:** {member} (`{member.id}`)",
-        title="Audit: Member Left"
-    )
-
 @bot.event
 async def on_message(message: discord.Message):
     if not message.guild or message.author.bot:
@@ -253,11 +206,11 @@ async def on_message(message: discord.Message):
             try:
                 await message.delete()
                 await message.author.timeout(datetime.timedelta(minutes=10), reason="Automod: Mass mentions")
-                await send_modlog(
-                    message.guild,
-                    f"**User:** {message.author.mention} (`{message.author.id}`)\n**Action:** 10m Timeout applied & message purged.",
-                    title="Automod: Mass Mentions"
+                embed = build_purple_embed(
+                    title="Automod Enforcement",
+                    description=f"{message.author.mention} has been timed out for 10 minutes (Mass mentions)."
                 )
+                await message.channel.send(embed=embed)
             except discord.Forbidden:
                 pass
             return
@@ -265,11 +218,8 @@ async def on_message(message: discord.Message):
         if INVITE_REGEX.search(message.content):
             try:
                 await message.delete()
-                await send_modlog(
-                    message.guild,
-                    f"**User:** {message.author.mention} (`{message.author.id}`)\n**Channel:** {message.channel.mention}\n**Action:** Invite link deleted.",
-                    title="Automod: Invite Link Filter"
-                )
+                warning = await message.channel.send(f"{message.author.mention}, invite links are not permitted.")
+                await warning.delete(delay=3)
             except discord.Forbidden:
                 pass
             return
@@ -278,11 +228,6 @@ async def on_message(message: discord.Message):
         if any(bad_word in lowered for bad_word in BANNED_WORDS):
             try:
                 await message.delete()
-                await send_modlog(
-                    message.guild,
-                    f"**User:** {message.author.mention} (`{message.author.id}`)\n**Channel:** {message.channel.mention}\n**Action:** Message deleted.",
-                    title="Automod: Banned Word Filter"
-                )
             except discord.Forbidden:
                 pass
             return
@@ -295,15 +240,15 @@ async def on_command_error(ctx: commands.Context, error: Exception):
         error = error.original
 
     if isinstance(error, commands.CheckFailure):
-        await safe_respond(ctx, "**Permission Denied:** You are not authorized to invoke this command.")
+        await safe_respond(ctx, "**Permission Denied:** You are not authorized to invoke this command.", ephemeral=True)
     elif isinstance(error, discord.Forbidden):
-        await safe_respond(ctx, "**Execution Failed:** Missing permissions or hierarchy block.")
+        await safe_respond(ctx, "**Execution Failed:** Missing permissions or hierarchy block.", ephemeral=True)
     elif isinstance(error, commands.MemberNotFound):
-        await safe_respond(ctx, "**Lookup Error:** Member not found.")
+        await safe_respond(ctx, "**Lookup Error:** Member not found.", ephemeral=True)
     elif isinstance(error, commands.MissingRequiredArgument):
-        await safe_respond(ctx, f"**Syntax Error:** Parameter *{error.param.name}* required.")
+        await safe_respond(ctx, f"**Syntax Error:** Parameter *{error.param.name}* required.", ephemeral=True)
     else:
-        await safe_respond(ctx, f"**Error:** `{error}`")
+        await safe_respond(ctx, f"**Error:** `{error}`", ephemeral=True)
 
 @bot.hybrid_command(name="say", description="Broadcasts a message.")
 @is_whitelisted()
@@ -326,13 +271,12 @@ async def say(ctx: commands.Context, message: str, channel: Optional[discord.Tex
 async def kick(ctx: commands.Context, member: discord.Member, *, reason: Optional[str] = "None provided"):
     allowed, msg = can_moderate(ctx, member)
     if not allowed:
-        return await safe_respond(ctx, msg)
+        return await safe_respond(ctx, msg, ephemeral=True)
         
     await member.kick(reason=reason)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
-        f"**Target:** {member} (`{member.id}`)\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
+    await safe_respond(
+        ctx, 
+        f"**Target:** {member.mention} (`{member.id}`)\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
         title="Action: Kick"
     )
 
@@ -342,14 +286,13 @@ async def kick(ctx: commands.Context, member: discord.Member, *, reason: Optiona
 async def ban(ctx: commands.Context, member: discord.Member, delete_days: Optional[int] = 0, *, reason: Optional[str] = "None provided"):
     allowed, msg = can_moderate(ctx, member)
     if not allowed:
-        return await safe_respond(ctx, msg)
+        return await safe_respond(ctx, msg, ephemeral=True)
         
     secs = max(0, min(delete_days, 7)) * 86400
     await member.ban(reason=reason, delete_message_seconds=secs)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
-        f"**Target:** {member} (`{member.id}`)\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
+    await safe_respond(
+        ctx, 
+        f"**Target:** {member.mention} (`{member.id}`)\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
         title="Action: Ban"
     )
 
@@ -360,16 +303,15 @@ async def unban(ctx: commands.Context, user_id: str, *, reason: Optional[str] = 
     try:
         user = await bot.fetch_user(int(user_id))
         await ctx.guild.unban(user, reason=reason)
-        await safe_respond(ctx, "Command executed.")
-        await send_modlog(
-            ctx.guild, 
-            f"**Target:** {user} (`{user.id}`)\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
+        await safe_respond(
+            ctx, 
+            f"**Target:** {user.name} (`{user.id}`)\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
             title="Action: Unban"
         )
     except discord.NotFound:
-        await safe_respond(ctx, "**Lookup Error:** No ban record found.")
+        await safe_respond(ctx, "**Lookup Error:** No ban record found.", ephemeral=True)
     except ValueError:
-        await safe_respond(ctx, "**Syntax Error:** ID must be numeric.")
+        await safe_respond(ctx, "**Syntax Error:** ID must be numeric.", ephemeral=True)
 
 @bot.hybrid_command(name="softban", description="Bans and instantly unbans to clear past messages.")
 @is_whitelisted()
@@ -377,14 +319,13 @@ async def unban(ctx: commands.Context, user_id: str, *, reason: Optional[str] = 
 async def softban(ctx: commands.Context, member: discord.Member, *, reason: Optional[str] = "None provided"):
     allowed, msg = can_moderate(ctx, member)
     if not allowed:
-        return await safe_respond(ctx, msg)
+        return await safe_respond(ctx, msg, ephemeral=True)
         
     await member.ban(reason=f"Softban: {reason}", delete_message_seconds=604800)
     await ctx.guild.unban(member, reason="Softban cleanup")
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
-        f"**Target:** {member} (`{member.id}`)\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
+    await safe_respond(
+        ctx, 
+        f"**Target:** {member.mention} (`{member.id}`)\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
         title="Action: Softban"
     )
 
@@ -394,13 +335,12 @@ async def softban(ctx: commands.Context, member: discord.Member, *, reason: Opti
 async def timeout(ctx: commands.Context, member: discord.Member, minutes: int, *, reason: Optional[str] = "None provided"):
     allowed, msg = can_moderate(ctx, member)
     if not allowed:
-        return await safe_respond(ctx, msg)
+        return await safe_respond(ctx, msg, ephemeral=True)
         
     await member.timeout(datetime.timedelta(minutes=minutes), reason=reason)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
-        f"**Target:** {member} (`{member.id}`)\n**Duration:** `{minutes}m`\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
+    await safe_respond(
+        ctx, 
+        f"**Target:** {member.mention} (`{member.id}`)\n**Duration:** `{minutes}m`\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
         title="Action: Timeout"
     )
 
@@ -409,10 +349,9 @@ async def timeout(ctx: commands.Context, member: discord.Member, minutes: int, *
 @app_commands.describe(member="Member")
 async def untimeout(ctx: commands.Context, member: discord.Member):
     await member.timeout(None)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
-        f"**Target:** {member} (`{member.id}`)\n**Moderator:** {ctx.author.mention}",
+    await safe_respond(
+        ctx, 
+        f"**Target:** {member.mention} (`{member.id}`)\n**Moderator:** {ctx.author.mention}",
         title="Action: Untimeout"
     )
 
@@ -421,23 +360,16 @@ async def untimeout(ctx: commands.Context, member: discord.Member):
 @app_commands.describe(amount="Messages to delete (1-100)")
 async def purge(ctx: commands.Context, amount: int):
     if amount < 1 or amount > 100:
-        return await safe_respond(ctx, "**Limit Exceeded:** Value must be between 1 and 100.")
+        return await safe_respond(ctx, "**Limit Exceeded:** Value must be between 1 and 100.", ephemeral=True)
         
     if ctx.interaction:
         await ctx.interaction.response.defer(ephemeral=True)
         deleted = await ctx.channel.purge(limit=amount)
-        await safe_respond(ctx, "Command executed.", ephemeral=True)
+        await safe_respond(ctx, f"Purged `{len(deleted)}` messages.", ephemeral=True, title="Action: Purge")
     else:
         deleted = await ctx.channel.purge(limit=amount + 1)
-        confirm_embed = build_purple_embed(description="Command executed.")
-        confirm = await ctx.send(embed=confirm_embed)
-        await confirm.delete(delay=2)
-
-    await send_modlog(
-        ctx.guild, 
-        f"**Channel:** {ctx.channel.mention}\n**Count:** `{len(deleted)}`\n**Moderator:** {ctx.author.mention}",
-        title="Action: Purge"
-    )
+        confirm = await ctx.send(embed=build_purple_embed(title="Action: Purge", description=f"Purged `{len(deleted) - 1}` messages."))
+        await confirm.delete(delay=3)
 
 @bot.hybrid_command(name="lock", description="Locks current channel.")
 @is_whitelisted()
@@ -445,9 +377,8 @@ async def lock(ctx: commands.Context):
     overwrite = ctx.channel.overwrites_for(ctx.guild.default_role)
     overwrite.send_messages = False
     await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
+    await safe_respond(
+        ctx, 
         f"**Channel:** {ctx.channel.mention}\n**Moderator:** {ctx.author.mention}",
         title="Action: Channel Locked"
     )
@@ -458,9 +389,8 @@ async def unlock(ctx: commands.Context):
     overwrite = ctx.channel.overwrites_for(ctx.guild.default_role)
     overwrite.send_messages = True
     await ctx.channel.set_permissions(ctx.guild.default_role, overwrite=overwrite)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
+    await safe_respond(
+        ctx, 
         f"**Channel:** {ctx.channel.mention}\n**Moderator:** {ctx.author.mention}",
         title="Action: Channel Unlocked"
     )
@@ -470,9 +400,8 @@ async def unlock(ctx: commands.Context):
 @app_commands.describe(seconds="Delay in seconds")
 async def slowmode(ctx: commands.Context, seconds: int):
     await ctx.channel.edit(slowmode_delay=seconds)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
+    await safe_respond(
+        ctx, 
         f"**Channel:** {ctx.channel.mention}\n**Seconds:** `{seconds}s`\n**Moderator:** {ctx.author.mention}",
         title="Action: Slowmode"
     )
@@ -482,10 +411,9 @@ async def slowmode(ctx: commands.Context, seconds: int):
 @app_commands.describe(member="Target member", reason="Infraction reason")
 async def warn(ctx: commands.Context, member: discord.Member, *, reason: str):
     count = db_add_warning(ctx.guild.id, member.id, ctx.author.id, ctx.author.name, reason)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
-        f"**Target:** {member} (`{member.id}`)\n**Infraction Count:** `{count}`\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
+    await safe_respond(
+        ctx, 
+        f"**Target:** {member.mention} (`{member.id}`)\n**Total Infractions:** `{count}`\n**Moderator:** {ctx.author.mention}\n**Reason:** *{reason}*",
         title="Action: Warn"
     )
 
@@ -508,10 +436,9 @@ async def warnings(ctx: commands.Context, member: discord.Member):
 @app_commands.describe(member="Target member")
 async def clearwarns(ctx: commands.Context, member: discord.Member):
     deleted = db_clear_warnings(ctx.guild.id, member.id)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
-        f"**Target:** {member} (`{member.id}`)\n**Cleared:** `{deleted}` infractions\n**Moderator:** {ctx.author.mention}",
+    await safe_respond(
+        ctx, 
+        f"**Target:** {member.mention} (`{member.id}`)\n**Cleared:** `{deleted}` infractions\n**Moderator:** {ctx.author.mention}",
         title="Action: Clear Warnings"
     )
 
@@ -521,13 +448,12 @@ async def clearwarns(ctx: commands.Context, member: discord.Member):
 async def nick(ctx: commands.Context, member: discord.Member, *, new_nick: Optional[str] = None):
     allowed, msg = can_moderate(ctx, member)
     if not allowed:
-        return await safe_respond(ctx, msg)
+        return await safe_respond(ctx, msg, ephemeral=True)
         
     await member.edit(nick=new_nick)
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
-        f"**Target:** {member} (`{member.id}`)\n**New Nick:** `{new_nick or 'Reset'}`\n**Moderator:** {ctx.author.mention}",
+    await safe_respond(
+        ctx, 
+        f"**Target:** {member.mention} (`{member.id}`)\n**New Nick:** `{new_nick or 'Reset'}`\n**Moderator:** {ctx.author.mention}",
         title="Action: Nickname Update"
     )
 
@@ -536,7 +462,7 @@ async def nick(ctx: commands.Context, member: discord.Member, *, new_nick: Optio
 @app_commands.describe(action="'add' or 'remove'", member="Target member", role="Target role")
 async def role(ctx: commands.Context, action: str, member: discord.Member, role: discord.Role):
     if role >= ctx.guild.me.top_role:
-        return await safe_respond(ctx, "**Hierarchy Error:** That role is equal to or higher than my top role.")
+        return await safe_respond(ctx, "**Hierarchy Error:** That role is equal to or higher than my top role.", ephemeral=True)
         
     action = action.lower().strip()
     if action == "add":
@@ -544,12 +470,11 @@ async def role(ctx: commands.Context, action: str, member: discord.Member, role:
     elif action == "remove":
         await member.remove_roles(role)
     else:
-        return await safe_respond(ctx, "**Syntax Error:** Specify `add` or `remove`.")
+        return await safe_respond(ctx, "**Syntax Error:** Specify `add` or `remove`.", ephemeral=True)
         
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
-        f"**Action:** `{action.upper()}`\n**Role:** {role.name}\n**Target:** {member} (`{member.id}`)\n**Moderator:** {ctx.author.mention}",
+    await safe_respond(
+        ctx, 
+        f"**Action:** `{action.upper()}`\n**Role:** {role.name}\n**Target:** {member.mention} (`{member.id}`)\n**Moderator:** {ctx.author.mention}",
         title="Action: Role Modified"
     )
 
@@ -567,11 +492,6 @@ async def nuke(ctx: commands.Context):
         await new_channel.send(embed=embed, file=f)
     else:
         await new_channel.send(embed=embed)
-    await send_modlog(
-        ctx.guild, 
-        f"**Channel:** #{new_channel.name}\n**Moderator:** {ctx.author.mention}",
-        title="Action: Channel Nuked"
-    )
 
 @bot.hybrid_command(name="lockdown", description="Locks down all public channels in the server.")
 @is_whitelisted()
@@ -584,9 +504,8 @@ async def lockdown(ctx: commands.Context):
             await ch.set_permissions(ctx.guild.default_role, overwrite=overwrite)
             locked += 1
             
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
+    await safe_respond(
+        ctx, 
         f"**Channels Closed:** `{locked}`\n**Moderator:** {ctx.author.mention}",
         title="Alert: Server Lockdown"
     )
@@ -601,9 +520,8 @@ async def unlockdown(ctx: commands.Context):
         await ch.set_permissions(ctx.guild.default_role, overwrite=overwrite)
         unlocked += 1
         
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild, 
+    await safe_respond(
+        ctx, 
         f"**Channels Restored:** `{unlocked}`\n**Moderator:** {ctx.author.mention}",
         title="Alert: Server Unlockdown"
     )
@@ -614,7 +532,7 @@ async def unlockdown(ctx: commands.Context):
 async def massban(ctx: commands.Context, *, ids: str):
     parsed_ids = re.findall(r"\b\d{17,20}\b", ids)
     if not parsed_ids:
-        return await safe_respond(ctx, "**Syntax Error:** No valid Discord snowflakes detected.")
+        return await safe_respond(ctx, "**Syntax Error:** No valid Discord snowflakes detected.", ephemeral=True)
     
     banned = []
     failed = []
@@ -625,9 +543,8 @@ async def massban(ctx: commands.Context, *, ids: str):
         except Exception:
             failed.append(user_id)
 
-    await safe_respond(ctx, "Command executed.")
-    await send_modlog(
-        ctx.guild,
+    await safe_respond(
+        ctx,
         f"**Success:** `{len(banned)}`\n**Failed:** `{len(failed)}`\n**Moderator:** {ctx.author.mention}",
         title="Action: Massban"
     )
@@ -637,7 +554,7 @@ async def massban(ctx: commands.Context, *, ids: str):
 async def snipe(ctx: commands.Context):
     data = snipe_cache.get(ctx.channel.id)
     if not data:
-        return await safe_respond(ctx, "**Snipe:** No deleted messages recorded for this channel.")
+        return await safe_respond(ctx, "**Snipe:** No deleted messages recorded for this channel.", ephemeral=True)
     
     time_str = data["time"].strftime("%H:%M:%S UTC")
     msg = f"**Author:** `{data['author']}`\n**Time:** `{time_str}`\n**Message:** {data['content']}"
@@ -702,28 +619,9 @@ async def modhelp(ctx: commands.Context):
 `nick <user> [name]` — Change nickname
 `role <add/remove> <user> <role>` — Modify roles
 """
-# ================= RENDER KEEP-ALIVE SERVER =================
-from aiohttp import web
+    await safe_respond(ctx, help_text, ephemeral=False, title="Moderation & Utilities")
 
-async def handle_ping(request):
-    return web.Response(text="Bot is running!")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"[SYSTEM] Keep-alive web server active on port {port}")
-
-@bot.event
-async def setup_hook():
-    bot.loop.create_task(start_web_server())
-
-# ================= RUN =================
 if not TOKEN:
-    print("[CRITICAL] TOKEN not found in .env.")
+    print("[CRITICAL] TOKEN not found in .env.", flush=True)
 else:
     bot.run(TOKEN)
