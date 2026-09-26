@@ -1,11 +1,9 @@
 import os
 import re
-import urllib.parse
 import sqlite3
 import datetime
 from typing import Optional
 from dotenv import load_dotenv
-import aiohttp
 from aiohttp import web
 
 import discord
@@ -125,46 +123,6 @@ def is_whitelisted():
         raise commands.CheckFailure("Unauthorized execution.")
     return commands.check(predicate)
 
-async def ask_ai(prompt: str) -> str:
-    url = "https://text.pollinations.ai/"
-    payload = {
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are Amethyst, a direct, concise, and helpful server AI assistant."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "model": "openai"
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=25) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    if text.strip():
-                        return text.strip()
-    except Exception:
-        pass
-
-    try:
-        encoded = urllib.parse.quote(prompt)
-        fallback_url = f"https://text.pollinations.ai/{encoded}?system=You+are+Amethyst+a+helpful+discord+assistant"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(fallback_url, timeout=25) as resp:
-                if resp.status == 200:
-                    text = await resp.text()
-                    if text.strip():
-                        return text.strip()
-    except Exception as exc:
-        return f"Error contacting AI service: {exc}"
-
-    return "Unable to generate response at this time."
-
 async def handle_ping(request):
     return web.Response(text="Bot is operational.")
 
@@ -264,7 +222,7 @@ async def on_message(message: discord.Message):
             )
             embed = build_purple_embed(
                 title="Automod: Warning Issued",
-                description=f"{message.author.mention} has received a warning for profanity.\n**Total Infractions:** `{count}`"
+                description=f"{message.author.mention} has received an automatic warning for profanity.\n**Total Infractions:** `{count}`"
             )
             warning_msg = await message.channel.send(embed=embed)
             await warning_msg.delete(delay=5)
@@ -301,20 +259,15 @@ async def on_message(message: discord.Message):
             return
 
     if bot.user in message.mentions and not message.mention_everyone:
-        clean_prompt = message.content.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
-        if not clean_prompt:
-            clean_prompt = "Hello!"
-            
-        async with message.channel.typing():
-            ai_reply = await ask_ai(clean_prompt)
-            if len(ai_reply) > 4000:
-                ai_reply = ai_reply[:3997] + "..."
-            embed = build_purple_embed(title="Amethyst AI", description=ai_reply)
-            f = get_footer_file()
-            if f:
-                await message.reply(embed=embed, file=f)
-            else:
-                await message.reply(embed=embed)
+        embed = build_purple_embed(
+            title="Amethyst Moderation",
+            description=f"Hello {message.author.mention}. Use `/modhelp` or `!modhelp` to see active commands."
+        )
+        f = get_footer_file()
+        if f:
+            await message.reply(embed=embed, file=f)
+        else:
+            await message.reply(embed=embed)
         return
 
     await bot.process_commands(message)
