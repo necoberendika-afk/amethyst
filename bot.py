@@ -13,7 +13,7 @@ from discord import app_commands
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 env_whitelist = os.getenv("WHITELIST", "")
 WHITELISTED_USERS = set()
@@ -125,40 +125,41 @@ def is_whitelisted():
         raise commands.CheckFailure("Unauthorized execution.")
     return commands.check(predicate)
 
-async def ask_deepseek(prompt: str) -> str:
-    if not OPENROUTER_API_KEY:
-        return "AI API key is not configured."
+async def ask_ai(prompt: str) -> str:
+    if not GROQ_API_KEY:
+        return "AI API key is not configured. Please add GROQ_API_KEY."
 
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {GROQ_API_KEY.strip()}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "deepseek/deepseek-chat:free",
+        "model": "llama-3.3-70b-versatile",
         "messages": [
             {
                 "role": "system",
-                "content": "You are Amethyst, a direct, concise, and helpful server AI assistant."
+                "content": "You are Amethyst, a direct, concise, and intelligent server assistant. Answer helpfully and cleanly without markdown fluff."
             },
             {
                 "role": "user",
                 "content": prompt
             }
-        ]
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1000
     }
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=30) as resp:
+            async with session.post(url, headers=headers, json=payload, timeout=25) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data["choices"][0]["message"]["content"]
                 else:
-                    err = await resp.text()
                     return f"API Error ({resp.status}): Unable to process response."
     except Exception as exc:
-        return f"Error contacting AI: {exc}"
+        return f"Error contacting AI service: {exc}"
 
 async def handle_ping(request):
     return web.Response(text="Bot is operational.")
@@ -301,7 +302,7 @@ async def on_message(message: discord.Message):
             clean_prompt = "Hello!"
             
         async with message.channel.typing():
-            ai_reply = await ask_deepseek(clean_prompt)
+            ai_reply = await ask_ai(clean_prompt)
             if len(ai_reply) > 4000:
                 ai_reply = ai_reply[:3997] + "..."
             embed = build_purple_embed(title="Amethyst AI", description=ai_reply)
